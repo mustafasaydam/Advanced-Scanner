@@ -1,0 +1,43 @@
+targets:
+  - "example.com"
+  - "192.168.1.0/24"
+
+scan_profile: "full"  # quick, standard, full, discovery
+output_formats: ["html", "json"]
+
+tools:
+  nmap:
+    options: "-sV -sC -O --script=vulners --script-timeout 2m --min-hostgroup 64"
+    timing: "-T4"
+    ports: "--top-ports 1000"
+    auto_update: true
+
+  nuclei:
+    templates: "builtin"  # builtin or custom path
+    severity: "low,medium,high,critical"
+    rate_limit: 150
+    timeout: 10
+    auto_update: true
+
+  zap:
+    api_key: "auto_generated"
+    proxy: "http://localhost:8080"
+    policy: "recommended"
+    max_scan_duration: 60
+
+  subdomain:
+    tools: ["amass", "subfinder"]
+    wordlist: "builtin"
+
+  directory:
+    tool: "dirsearch"
+    wordlist: "builtin"
+
+notifications:
+  email:
+    enabled: false
+    smtp_server: "smtp.example.com"
+    recipients: ["admin@example.com"]
+  slack:
+    enabled: false
+    webhook: ""
