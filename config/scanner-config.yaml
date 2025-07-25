@@ -1,0 +1,25 @@
+# Global ayarlar
+general:
+  threads: 10
+  timeout: 3600  # saniye cinsinden
+  verbosity: high
+
+# Nmap ayarları
+nmap:
+  intensity: normal  # light/normal/full
+  ports: "80,443"
+  scripts: "vuln,discovery"
+  options: "-sV --version-intensity 5"
+
+# Nuclei ayarları
+nuclei:
+  templates: "~/nuclei-templates"
+  severity: "low,medium,high,critical"
+  rate_limit: 150
+  timeout: 10
+
+# ZAP ayarları
+zap:
+  active_scan: true
+  spider_timeout: 15
+  api_key: "changeme"
