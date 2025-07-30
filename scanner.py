@@ -6,7 +6,6 @@ import time
 import argparse
 import subprocess
 from xml.etree import ElementTree as ET
-from zapv2 import ZAPv2
 import pandas as pd
 from xml.dom import minidom
 import ipaddress
@@ -170,77 +169,22 @@ def nuclei_scan(url_target, template_path="~/.local/nuclei-templates"):
         print(f"{COLOR_RED}[-] Nuclei raporu oluşturulurken hata: {str(e)}{COLOR_END}")
         return json_file, None
 
-# ZAP'ı terminalden başlatma
-def start_zap(zap_path="zap.sh", zap_port=8080, api_key="your-api-key"):
-    """ZAP'ı terminalden başlatır"""
-    print("[*] ZAP başlatılıyor...")
+def run_zap_scan(target_url):
+    """Terminal komutuyla basit ZAP taraması yapar"""
+    print(f"{COLOR_BLUE}[*] ZAP taraması başlatılıyor: {target_url}{COLOR_END}")
     
-    try:
-        # ZAP'ı arka planda başlat
-        cmd = [
-            zap_path,
-            "-daemon",
-            "-port", str(zap_port),
-            "-host", "127.0.0.1",
-            "-config", f"api.key={api_key}",
-            "-config", "api.disablekey=true",  # API key kontrolünü devre dışı bırak (isteğe bağlı)
-            "-nostdout"
-        ]
-        
-        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        
-        # Bağlantının hazır olmasını bekle
-        for _ in range(30):
-            try:
-                # Basit bir şekilde ZAP'ın çalışıp çalışmadığını kontrol etmek için `curl` kullanabiliriz
-                check_cmd = [
-                    "curl", "-s", f"http://127.0.0.1:{zap_port}/JSON/core/action/version",
-                    "-H", f"X-ZAP-API-Key: {api_key}"
-                ]
-                result = subprocess.run(check_cmd, capture_output=True, text=True)
-                if "version" in result.stdout:
-                    print("[+] ZAP başarıyla başlatıldı")
-                    return True
-            except:
-                pass
-            time.sleep(1)
-        
-        print("[-] ZAP başlatılırken zaman aşımı (30 saniye)")
-        return False
-    except Exception as e:
-        print(f"[-] ZAP başlatılamadı: {str(e)}")
-        return False
-
-# ZAP taramasını terminalden yapma
-def zap_scan(target_url, api_key="your-api-key", zap_port=8080):
-    """Terminalden ZAP taraması yapar"""
-    print(f"[*] ZAP taraması başlatılıyor: {target_url}")
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    report_file = f"reports/zap_report_{target_url.replace('://', '_').replace('/', '_')}_{timestamp}.html"
     
-    try:
-        # Aktif tarama yap
-        scan_cmd = [
-            "zap-cli", "quick-scan",  # `zap-cli` kurulu olmalı
-            "--start-options", f"-config api.key={api_key}",
-            "--spider", "--ajax-spider", "--active-scan",
-            target_url
-        ]
-        
-        subprocess.run(scan_cmd, check=True)
-        
-        # Rapor oluştur
-        report_file = f"zap_report_{target_url.replace('://', '_').replace('/', '_')}.html"
-        report_cmd = [
-            "curl", "-s",
-            f"http://127.0.0.1:{zap_port}/OTHER/core/other/htmlreport",
-            "-o", report_file
-        ]
-        subprocess.run(report_cmd, check=True)
-        
-        print(f"[+] Tarama tamamlandı. Rapor: {report_file}")
-        return report_file
-    except subprocess.CalledProcessError as e:
-        print(f"[-] Tarama hatası: {str(e)}")
+    cmd = f"zap.sh -cmd -quickurl {target_url} -quickout {report_file}"
+    stdout, stderr, error = run_command(cmd, timeout=1800)
+    
+    if error:
+        print(f"{COLOR_RED}[-] ZAP taramasında hata: {stderr}{COLOR_END}")
         return None
+    
+    print(f"{COLOR_GREEN}[+] ZAP taraması tamamlandı. Rapor: {report_file}{COLOR_END}")
+    return report_file
 
 def subdomain_scan(domain_target):
     """Domain hedefleri için subdomain keşfi yapar"""
@@ -479,6 +423,15 @@ def generate_report(nmap_files=None, nuclei_files=None, zap_files=None, subdomai
                     'subdomainler': subdomains
                 }
     
+    # ZAP sonuçlarını işle
+    if zap_files:
+        report_data['Tarama Bilgileri']['Kullanılan Araçlar'].append('OWASP ZAP')
+        for file in zap_files:
+            if file and os.path.exists(file):
+                report_data[f'ZAP Taraması - {os.path.basename(file)}'] = {
+                    'rapor_dosyası': file
+                }
+    
     # Excel raporu oluştur
     try:
         with pd.ExcelWriter(output_file) as writer:
@@ -558,11 +511,6 @@ def main():
     parser.add_argument('-i', '--ip', help='Taranacak IP adresi veya IP bloğu')
     parser.add_argument('-m', '--mode', choices=['full', 'web', 'network', 'subdomain'], 
                        default='full', help='Tarama modu (default: full)')
-    parser.add_argument('--zap-api', default='your-api-key', help='OWASP ZAP API anahtarı')
-    parser.add_argument('--zap-proxy', default='http://127.0.0.1:8080', 
-                       help='ZAP proxy adresi (default: http://127.0.0.1:8080)')
-    parser.add_argument('--zap-path', default='zap.sh', 
-                       help='ZAP çalıştırılabilir dosya yolu (default: zap.sh)')
     parser.add_argument('--nuclei-templates', default='~/.local/nuclei-templates', 
                        help='Nuclei template dizini')
     
@@ -579,14 +527,6 @@ def main():
     subdomain_results = None
     
     try:
-        # ZAP'ı başlat (eğer web taraması yapılacaksa)
-        if args.domain and args.mode in ['full', 'web']:
-            if not start_zap(zap_path=args.zap_path, 
-                           zap_port=int(args.zap_proxy.split(':')[-1]), 
-                           api_key=args.zap_api):
-                print(f"{COLOR_RED}[-] ZAP başlatılamadı, web taramaları atlanacak{COLOR_END}")
-                args.mode = 'network' if args.ip else 'subdomain'
-        
         # IP taraması (Nmap)
         if args.ip and args.mode in ['full', 'network']:
             nmap_results = nmap_scan(args.ip, 'full' if args.mode == 'full' else 'detailed')
@@ -601,27 +541,26 @@ def main():
             
             # Web taramaları (ZAP ve Nuclei)
             if args.mode in ['full', 'web']:
-                zap_targets = []
-                
-                # Ana domaini ekle
-                if not args.domain.startswith(('http://', 'https://')):
-                    zap_targets.append(f"https://{domain}")  # Varsayılan HTTPS
+                # ZAP taraması (sadece ana domain için)
+                if args.domain.startswith(('http://', 'https://')):
+                    target_url = args.domain
                 else:
-                    zap_targets.append(args.domain)
+                    target_url = f"https://{domain}"  # Varsayılan HTTPS
+                
+                zap_results = run_zap_scan(target_url)
+                
+                # Nuclei taraması (ana domain ve subdomainler)
+                nuclei_results = []
+                nuclei_targets = [target_url]
                 
                 # Bulunan subdomainleri ekle
                 if subdomain_results and os.path.exists(subdomain_results[0]):
                     with open(subdomain_results[0], 'r') as f:
                         subdomains = [line.strip() for line in f.readlines() if line.strip()]
-                        zap_targets.extend([f"https://{sub}" for sub in subdomains])
+                        nuclei_targets.extend([f"https://{sub}" for sub in subdomains])
                 
-                # ZAP taraması
-                if zap_targets:
-                    zap_results = zap_scan(zap_targets, args.zap_api, args.zap_proxy)
-                
-                # Nuclei taraması (ana domain ve subdomainler)
-                nuclei_results = []
-                for target in zap_targets if zap_targets else [f"https://{domain}"]:
+                # Nuclei taraması yap
+                for target in nuclei_targets:
                     nuclei_result = nuclei_scan(target, args.nuclei_templates)
                     if nuclei_result[0]:
                         nuclei_results.append(nuclei_result[0])  # JSON dosyasını ekle
@@ -630,7 +569,7 @@ def main():
         report_file = generate_report(
             nmap_files=[nmap_results[0]] if nmap_results else None,
             nuclei_files=nuclei_results if nuclei_results else None,
-            zap_files=zap_results if zap_results else None,
+            zap_files=[zap_results] if zap_results else None,
             subdomain_files=[subdomain_results[0]] if subdomain_results else None
         )
         
