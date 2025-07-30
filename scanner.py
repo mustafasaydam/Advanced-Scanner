@@ -170,100 +170,76 @@ def nuclei_scan(url_target, template_path="~/.local/nuclei-templates"):
         print(f"{COLOR_RED}[-] Nuclei raporu oluşturulurken hata: {str(e)}{COLOR_END}")
         return json_file, None
 
+# ZAP'ı terminalden başlatma
 def start_zap(zap_path="zap.sh", zap_port=8080, api_key="your-api-key"):
-    """ZAP'ı otomatik başlatır"""
-    print(f"{COLOR_BLUE}[*] ZAP başlatılıyor...{COLOR_END}")
+    """ZAP'ı terminalden başlatır"""
+    print("[*] ZAP başlatılıyor...")
     
-    # ZAP'ın zaten çalışıp çalışmadığını kontrol et
     try:
-        zap = ZAPv2(apikey=api_key, proxies={'http': f'http://127.0.0.1:{zap_port}', 
-                   'https': f'http://127.0.0.1:{zap_port}'})
-        zap.core.version()
-        print(f"{COLOR_GREEN}[+] ZAP zaten çalışıyor{COLOR_END}")
-        return True
-    except:
-        pass
-    
-    # ZAP'ı başlat
-    try:
-        cmd = f"{zap_path} -daemon -port {zap_port} -host 127.0.0.1 -config api.key={api_key} -nostdout"
-        subprocess.Popen(cmd.split(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # ZAP'ı arka planda başlat
+        cmd = [
+            zap_path,
+            "-daemon",
+            "-port", str(zap_port),
+            "-host", "127.0.0.1",
+            "-config", f"api.key={api_key}",
+            "-config", "api.disablekey=true",  # API key kontrolünü devre dışı bırak (isteğe bağlı)
+            "-nostdout"
+        ]
         
-        # Bağlantının hazır olmasını bekle (maksimum 30 saniye)
-        max_wait = 30
-        for _ in range(max_wait):
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+        # Bağlantının hazır olmasını bekle
+        for _ in range(30):
             try:
-                zap = ZAPv2(apikey=api_key, proxies={'http': f'http://127.0.0.1:{zap_port}', 
-                           'https': f'http://127.0.0.1:{zap_port}'})
-                zap.core.version()
-                print(f"{COLOR_GREEN}[+] ZAP başarıyla başlatıldı{COLOR_END}")
-                return True
-            except Exception as e:
-                time.sleep(1)
+                # Basit bir şekilde ZAP'ın çalışıp çalışmadığını kontrol etmek için `curl` kullanabiliriz
+                check_cmd = [
+                    "curl", "-s", f"http://127.0.0.1:{zap_port}/JSON/core/action/version",
+                    "-H", f"X-ZAP-API-Key: {api_key}"
+                ]
+                result = subprocess.run(check_cmd, capture_output=True, text=True)
+                if "version" in result.stdout:
+                    print("[+] ZAP başarıyla başlatıldı")
+                    return True
+            except:
+                pass
+            time.sleep(1)
         
-        print(f"{COLOR_RED}[-] ZAP başlatılırken zaman aşımı (30 saniye){COLOR_END}")
+        print("[-] ZAP başlatılırken zaman aşımı (30 saniye)")
         return False
     except Exception as e:
-        print(f"{COLOR_RED}[-] ZAP başlatılamadı: {str(e)}{COLOR_END}")
+        print(f"[-] ZAP başlatılamadı: {str(e)}")
         return False
 
-def zap_scan(url_targets, api_key='your-api-key'):
-    """URL hedefleri için ZAP taraması yapar"""
-    if not url_targets:
-        return None
-
-    print(f"{COLOR_BLUE}[*] OWASP ZAP taraması başlatılıyor...{COLOR_END}")
-    
-    timestamp = time.strftime("%Y%m%d-%H%M%S")
-    output_files = []
+# ZAP taramasını terminalden yapma
+def zap_scan(target_url, api_key="your-api-key", zap_port=8080):
+    """Terminalden ZAP taraması yapar"""
+    print(f"[*] ZAP taraması başlatılıyor: {target_url}")
     
     try:
-        zap = ZAPv2(apikey=api_key, proxies={'http': 'http://127.0.0.1:8080', 'https': 'http://127.0.0.1:8080'})
+        # Aktif tarama yap
+        scan_cmd = [
+            "zap-cli", "quick-scan",  # `zap-cli` kurulu olmalı
+            "--start-options", f"-config api.key={api_key}",
+            "--spider", "--ajax-spider", "--active-scan",
+            target_url
+        ]
         
-        for target in url_targets:
-            if not target.startswith(('http://', 'https://')):
-                target = f"https://{target}"  # Varsayılan HTTPS
-            
-            print(f"{COLOR_YELLOW}[*] Tarama başlatılıyor: {target}{COLOR_END}")
-            
-            try:
-                # Hedefi aç
-                zap.urlopen(target)
-                time.sleep(2)
-                
-                # Spider tarama
-                print(f"{COLOR_YELLOW}[*] Spider tarama başlatılıyor...{COLOR_END}")
-                scan_id = zap.spider.scan(target)
-                
-                while int(zap.spider.status(scan_id)) < 100:
-                    print(f"{COLOR_YELLOW}[*] Spider ilerleme: %{zap.spider.status(scan_id)}{COLOR_END}")
-                    time.sleep(5)
-                
-                # Aktif tarama
-                print(f"{COLOR_YELLOW}[*] Aktif tarama başlatılıyor...{COLOR_END}")
-                scan_id = zap.ascan.scan(target)
-                
-                while int(zap.ascan.status(scan_id)) < 100:
-                    status = zap.ascan.status(scan_id)
-                    print(f"{COLOR_YELLOW}[*] Aktif tarama ilerleme: %{status}{COLOR_END}")
-                    time.sleep(10)
-                
-                # Rapor oluştur
-                report_file = f"reports/zap_report_{target.replace('://', '_').replace('/', '_')}_{timestamp}.html"
-                with open(report_file, 'w') as f:
-                    f.write(zap.core.htmlreport())
-                
-                output_files.append(report_file)
-                print(f"{COLOR_GREEN}[+] ZAP taraması tamamlandı: {report_file}{COLOR_END}")
-                
-            except Exception as e:
-                print(f"{COLOR_RED}[-] {target} taramasında hata: {str(e)}{COLOR_END}")
-                continue
+        subprocess.run(scan_cmd, check=True)
         
-        return output_files
-    
-    except Exception as e:
-        print(f"{COLOR_RED}[-] ZAP taramasında hata: {str(e)}{COLOR_END}")
+        # Rapor oluştur
+        report_file = f"zap_report_{target_url.replace('://', '_').replace('/', '_')}.html"
+        report_cmd = [
+            "curl", "-s",
+            f"http://127.0.0.1:{zap_port}/OTHER/core/other/htmlreport",
+            "-o", report_file
+        ]
+        subprocess.run(report_cmd, check=True)
+        
+        print(f"[+] Tarama tamamlandı. Rapor: {report_file}")
+        return report_file
+    except subprocess.CalledProcessError as e:
+        print(f"[-] Tarama hatası: {str(e)}")
         return None
 
 def subdomain_scan(domain_target):
