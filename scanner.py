@@ -170,6 +170,43 @@ def nuclei_scan(url_target, template_path="~/.local/nuclei-templates"):
         print(f"{COLOR_RED}[-] Nuclei raporu oluşturulurken hata: {str(e)}{COLOR_END}")
         return json_file, None
 
+def start_zap(zap_path="zap.sh", zap_port=8080, api_key="your-api-key"):
+    """ZAP'ı otomatik başlatır"""
+    print(f"{COLOR_BLUE}[*] ZAP başlatılıyor...{COLOR_END}")
+    
+    # ZAP'ın zaten çalışıp çalışmadığını kontrol et
+    try:
+        zap = ZAPv2(apikey=api_key, proxies={'http': f'http://127.0.0.1:{zap_port}', 
+                   'https': f'http://127.0.0.1:{zap_port}'})
+        zap.core.version()
+        print(f"{COLOR_GREEN}[+] ZAP zaten çalışıyor{COLOR_END}")
+        return True
+    except:
+        pass
+    
+    # ZAP'ı başlat
+    try:
+        cmd = f"{zap_path} -daemon -port {zap_port} -host 127.0.0.1 -config api.key={api_key} -nostdout"
+        subprocess.Popen(cmd.split(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+        # Bağlantının hazır olmasını bekle (maksimum 30 saniye)
+        max_wait = 30
+        for _ in range(max_wait):
+            try:
+                zap = ZAPv2(apikey=api_key, proxies={'http': f'http://127.0.0.1:{zap_port}', 
+                           'https': f'http://127.0.0.1:{zap_port}'})
+                zap.core.version()
+                print(f"{COLOR_GREEN}[+] ZAP başarıyla başlatıldı{COLOR_END}")
+                return True
+            except Exception as e:
+                time.sleep(1)
+        
+        print(f"{COLOR_RED}[-] ZAP başlatılırken zaman aşımı (30 saniye){COLOR_END}")
+        return False
+    except Exception as e:
+        print(f"{COLOR_RED}[-] ZAP başlatılamadı: {str(e)}{COLOR_END}")
+        return False
+
 def zap_scan(url_targets, api_key='your-api-key'):
     """URL hedefleri için ZAP taraması yapar"""
     if not url_targets:
@@ -546,6 +583,10 @@ def main():
     parser.add_argument('-m', '--mode', choices=['full', 'web', 'network', 'subdomain'], 
                        default='full', help='Tarama modu (default: full)')
     parser.add_argument('--zap-api', default='your-api-key', help='OWASP ZAP API anahtarı')
+    parser.add_argument('--zap-proxy', default='http://127.0.0.1:8080', 
+                       help='ZAP proxy adresi (default: http://127.0.0.1:8080)')
+    parser.add_argument('--zap-path', default='zap.sh', 
+                       help='ZAP çalıştırılabilir dosya yolu (default: zap.sh)')
     parser.add_argument('--nuclei-templates', default='~/.local/nuclei-templates', 
                        help='Nuclei template dizini')
     
@@ -562,6 +603,14 @@ def main():
     subdomain_results = None
     
     try:
+        # ZAP'ı başlat (eğer web taraması yapılacaksa)
+        if args.domain and args.mode in ['full', 'web']:
+            if not start_zap(zap_path=args.zap_path, 
+                           zap_port=int(args.zap_proxy.split(':')[-1]), 
+                           api_key=args.zap_api):
+                print(f"{COLOR_RED}[-] ZAP başlatılamadı, web taramaları atlanacak{COLOR_END}")
+                args.mode = 'network' if args.ip else 'subdomain'
+        
         # IP taraması (Nmap)
         if args.ip and args.mode in ['full', 'network']:
             nmap_results = nmap_scan(args.ip, 'full' if args.mode == 'full' else 'detailed')
@@ -592,19 +641,19 @@ def main():
                 
                 # ZAP taraması
                 if zap_targets:
-                    zap_results = zap_scan(zap_targets, args.zap_api)
+                    zap_results = zap_scan(zap_targets, args.zap_api, args.zap_proxy)
                 
                 # Nuclei taraması (ana domain ve subdomainler)
-                for target in zap_targets:
+                nuclei_results = []
+                for target in zap_targets if zap_targets else [f"https://{domain}"]:
                     nuclei_result = nuclei_scan(target, args.nuclei_templates)
-                    if nuclei_results is None:
-                        nuclei_results = []
-                    nuclei_results.extend([nuclei_result[0]])  # JSON dosyasını ekle
+                    if nuclei_result[0]:
+                        nuclei_results.append(nuclei_result[0])  # JSON dosyasını ekle
         
         # Rapor oluştur
         report_file = generate_report(
             nmap_files=[nmap_results[0]] if nmap_results else None,
-            nuclei_files=[nuclei_results[0]] if nuclei_results else None,
+            nuclei_files=nuclei_results if nuclei_results else None,
             zap_files=zap_results if zap_results else None,
             subdomain_files=[subdomain_results[0]] if subdomain_results else None
         )
