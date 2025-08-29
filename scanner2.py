@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Zengin Tarama Scripti - Çoklu Güvenlik Araçları Entegrasyonu
-Kullanım: python zengin_tarama_scripti.py <hedef_ip>
+Kullanım: python zengin_tarama_scripti.py <hedef> [options]
 """
 
 import subprocess
@@ -12,12 +12,14 @@ import xml.etree.ElementTree as ET
 import time
 from typing import List, Dict, Any, Optional
 import argparse
-import threading
+import ipaddress
+import socket
 
 class ZenginTarayici:
-    def __init__(self, hedef_ip: str, çıktı_dizini: str = "tarama_sonuçları"):
-        self.hedef_ip = hedef_ip
+    def __init__(self, hedef: str, çıktı_dizini: str = "tarama_sonuçları", özel_portlar: List[str] = None):
+        self.hedef = hedef
         self.çıktı_dizini = çıktı_dizini
+        self.özel_portlar = özel_portlar or []
         self.port_bilgileri = {}
         self.web_servisleri = []
         self.keşfedilen_dizinler = []
@@ -46,7 +48,7 @@ class ZenginTarayici:
         for arac in araçlar.keys():
             try:
                 if arac == 'zap':
-                    # ZAP için özel kontrol (bash/zsh'de which komutu)
+                    # ZAP için özel kontrol
                     result = subprocess.run(['which', 'zap.sh'], capture_output=True, text=True)
                     araçlar[arac] = result.returncode == 0
                 else:
@@ -74,22 +76,40 @@ class ZenginTarayici:
             sıra.append({'adı': 'dirb', 'araç': 'dirb', 'açıklama': 'Dizin ve dosya keşfi'})
         
         if self.mevcut_araçlar['gobuster']:
-            sıra.append({'adı': 'gobuster', 'araç': 'gobuster', 'açıklama': 'Dizin/dosya ve alt alan adı keşfi'})
+            sıra.append({'adı': 'gobuster', 'araç': 'gobuster', 'açıklama': 'Dizin/dosya keşfi'})
         
-        # ZAP taramaları (otomatik ve aktif)
+        # ZAP taramaları
         if self.mevcut_araçlar['zap']:
             sıra.append({'adı': 'zap_baseline', 'araç': 'zap', 'açıklama': 'ZAP baseline taraması'})
-            sıra.append({'adı': 'zap_aktif', 'araç': 'zap', 'açıklama': 'ZAP aktif güvenlik taraması'})
         
         # Özel güvenlik açığı taramaları
         if self.mevcut_araçlar['nuclei']:
             sıra.append({'adı': 'nuclei', 'araç': 'nuclei', 'açıklama': 'Nuclei güvenlik açığı taraması'})
         
-        # SQL enjeksiyon testi (eğer web uygulaması varsa)
+        # SQL enjeksiyon testi
         if self.mevcut_araçlar['sqlmap']:
             sıra.append({'adı': 'sqlmap', 'araç': 'sqlmap', 'açıklama': 'SQL enjeksiyon testi'})
         
         return sıra
+    
+    def _hedef_ip_mi(self) -> bool:
+        """Hedefin IP adresi olup olmadığını kontrol et"""
+        try:
+            ipaddress.ip_address(self.hedef)
+            return True
+        except ValueError:
+            return False
+    
+    def _ip_çözümle(self) -> str:
+        """Domain'i IP'ye çözümle"""
+        if self._hedef_ip_mi():
+            return self.hedef
+        
+        try:
+            return socket.gethostbyname(self.hedef)
+        except socket.gaierror:
+            print(f"Domain çözümlenemedi: {self.hedef}")
+            return self.hedef
     
     def komut_çalıştır(self, komut: List[str], çıktı_dosyası: str = None, timeout: int = 1800) -> str:
         """Shell komutu çalıştır ve çıktıyı döndür"""
@@ -126,13 +146,21 @@ class ZenginTarayici:
     
     def nmap_hizli_tarama(self) -> str:
         """Hızlı port taraması"""
-        çıktı_dosyası = os.path.join(self.çıktı_dizini, f"{self.hedef_ip}_nmap_hizli.xml")
-        komut = ["nmap", "-T4", "-F", "-oX", çıktı_dosyası, self.hedef_ip]
-        print("Hızlı Nmap taraması yapılıyor...")
+        çıktı_dosyası = os.path.join(self.çıktı_dizini, f"{self.hedef}_nmap_hizli.xml")
+        
+        if self.özel_portlar:
+            # Özel port taraması
+            port_parametresi = ",".join(self.özel_portlar)
+            komut = ["nmap", "-T4", "-p", port_parametresi, "-oX", çıktı_dosyası, self.hedef]
+            print(f"Özel port taraması yapılıyor: {port_parametresi}")
+        else:
+            # Hızlı port taraması (top 1000 port)
+            komut = ["nmap", "-T4", "--top-ports", "1000", "-oX", çıktı_dosyası, self.hedef]
+            print("Hızlı Nmap taraması yapılıyor (top 1000 port)...")
         
         çıktı = self.komut_çalıştır(komut)
         
-        # Nmap çıktısını parse et ve port bilgilerini kaydet
+        # Nmap çıktısını parse et
         try:
             tree = ET.parse(çıktı_dosyası)
             root = tree.getroot()
@@ -153,7 +181,7 @@ class ZenginTarayici:
                 if service in ['http', 'https', 'http-proxy', 'http-alt']:
                     scheme = 'https' if service == 'https' else 'http'
                     self.web_servisleri.append({
-                        'url': f"{scheme}://{self.hedef_ip}:{port_id}",
+                        'url': f"{scheme}://{self.hedef}:{port_id}",
                         'port': port_id,
                         'scheme': scheme
                     })
@@ -172,8 +200,8 @@ class ZenginTarayici:
             return ""
         
         port_parametresi = ",".join(açık_portlar)
-        çıktı_dosyası = os.path.join(self.çıktı_dizini, f"{self.hedef_ip}_nmap_detaylı.xml")
-        komut = ["nmap", "-T4", "-A", "-sV", "--script", "vuln", "-p", port_parametresi, "-oX", çıktı_dosyası, self.hedef_ip]
+        çıktı_dosyası = os.path.join(self.çıktı_dizini, f"{self.hedef}_nmap_detaylı.xml")
+        komut = ["nmap", "-T4", "-A", "-sV", "-p", port_parametresi, "-oX", çıktı_dosyası, self.hedef]
         print("Detaylı Nmap taraması yapılıyor...")
         
         return self.komut_çalıştır(komut, timeout=3600)
@@ -186,7 +214,7 @@ class ZenginTarayici:
         
         sonuçlar = []
         for web_servis in self.web_servisleri:
-            çıktı_dosyası = os.path.join(self.çıktı_dizini, f"{self.hedef_ip}_nikto_{web_servis['port']}.txt")
+            çıktı_dosyası = os.path.join(self.çıktı_dizini, f"{self.hedef}_nikto_{web_servis['port']}.txt")
             komut = ["nikto", "-h", web_servis['url'], "-o", çıktı_dosyası, "-Format", "txt"]
             print(f"Nikto web taraması yapılıyor: {web_servis['url']}")
             
@@ -203,7 +231,7 @@ class ZenginTarayici:
         
         sonuçlar = []
         for web_servis in self.web_servisleri:
-            çıktı_dosyası = os.path.join(self.çıktı_dizini, f"{self.hedef_ip}_dirb_{web_servis['port']}.txt")
+            çıktı_dosyası = os.path.join(self.çıktı_dizini, f"{self.hedef}_dirb_{web_servis['port']}.txt")
             komut = ["dirb", web_servis['url'], "-o", çıktı_dosyası]
             print(f"DIRB dizin taraması yapılıyor: {web_servis['url']}")
             
@@ -214,7 +242,7 @@ class ZenginTarayici:
             try:
                 with open(çıktı_dosyası, 'r') as f:
                     içerik = f.read()
-                    # Basit bir parsing (gerçek uygulamada daha karmaşık olmalı)
+                    # Basit parsing
                     for satır in içerik.split('\n'):
                         if '+ ' in satır and 'http' in satır:
                             self.keşfedilen_dizinler.append(satır.split('+ ')[1].strip())
@@ -224,7 +252,7 @@ class ZenginTarayici:
         return ", ".join(sonuçlar)
     
     def gobuster_tarama(self) -> str:
-        """Dizin/dosya ve alt alan adı keşfi"""
+        """Dizin/dosya keşfi"""
         if not self.web_servisleri:
             print("Web servisi bulunamadı, Gobuster taraması atlanıyor.")
             return ""
@@ -232,8 +260,11 @@ class ZenginTarayici:
         sonuçlar = []
         for web_servis in self.web_servisleri:
             # Dizin taraması
-            çıktı_dosyası = os.path.join(self.çıktı_dizini, f"{self.hedef_ip}_gobuster_dir_{web_servis['port']}.txt")
-            wordlist = "/usr/share/wordlists/dirb/common.txt"  # Wordlist yolunu ayarlayın
+            çıktı_dosyası = os.path.join(self.çıktı_dizini, f"{self.hedef}_gobuster_dir_{web_servis['port']}.txt")
+            wordlist = "/usr/share/wordlists/dirb/common.txt"
+            if not os.path.exists(wordlist):
+                wordlist = "/usr/share/dirb/wordlists/common.txt"
+            
             komut = ["gobuster", "dir", "-u", web_servis['url'], "-w", wordlist, "-o", çıktı_dosyası]
             print(f"Gobuster dizin taraması yapılıyor: {web_servis['url']}")
             
@@ -250,7 +281,7 @@ class ZenginTarayici:
         
         sonuçlar = []
         for web_servis in self.web_servisleri:
-            çıktı_dosyası = os.path.join(self.çıktı_dizini, f"{self.hedef_ip}_zap_baseline_{web_servis['port']}.html")
+            çıktı_dosyası = os.path.join(self.çıktı_dizini, f"{self.hedef}_zap_baseline_{web_servis['port']}.html")
             komut = [
                 "zap.sh", "-cmd", 
                 "-quickurl", web_servis['url'],
@@ -264,31 +295,6 @@ class ZenginTarayici:
         
         return ", ".join(sonuçlar)
     
-    def zap_aktif_tarama(self) -> str:
-        """ZAP aktif güvenlik taraması"""
-        if not self.web_servisleri:
-            print("Web servisi bulunamadı, ZAP aktif taraması atlanıyor.")
-            return ""
-        
-        sonuçlar = []
-        for web_servis in self.web_servisleri:
-            çıktı_dosyası = os.path.join(self.çıktı_dizini, f"{self.hedef_ip}_zap_aktif_{web_servis['port']}.html")
-            komut = [
-                "zap.sh", "-cmd", 
-                "-quickurl", web_servis['url'],
-                "-quickout", çıktı_dosyası,
-                "-quickprogress",
-                "-config", "api.disablekey=true",
-                "-config", "scanner.attackOnStart=true",
-                "-config", "scanner.threadPerHost=10"
-            ]
-            print(f"ZAP aktif taraması yapılıyor: {web_servis['url']}")
-            
-            sonuç = self.komut_çalıştır(komut, timeout=7200)  # 2 saat zaman aşımı
-            sonuçlar.append(çıktı_dosyası)
-        
-        return ", ".join(sonuçlar)
-    
     def nuclei_tarama(self) -> str:
         """Nuclei güvenlik açığı taraması"""
         if not self.web_servisleri:
@@ -297,7 +303,7 @@ class ZenginTarayici:
         
         sonuçlar = []
         for web_servis in self.web_servisleri:
-            çıktı_dosyası = os.path.join(self.çıktı_dizini, f"{self.hedef_ip}_nuclei_{web_servis['port']}.txt")
+            çıktı_dosyası = os.path.join(self.çıktı_dizini, f"{self.hedef}_nuclei_{web_servis['port']}.txt")
             komut = ["nuclei", "-u", web_servis['url'], "-o", çıktı_dosyası]
             print(f"Nuclei güvenlik açığı taraması yapılıyor: {web_servis['url']}")
             
@@ -316,8 +322,8 @@ class ZenginTarayici:
         test_edilecek_urls = self.keşfedilen_dizinler[:3]  # İlk 3 URL'yi test et
         
         for url in test_edilecek_urls:
-            çıktı_dosyası = os.path.join(self.çıktı_dizini, f"{self.hedef_ip}_sqlmap_{url.split('/')[-1]}.txt")
-            komut = ["sqlmap", "-u", url, "--batch", "--level=2", "--risk=2", "--output-dir", self.çıktı_dizini]
+            çıktı_dosyası = os.path.join(self.çıktı_dizini, f"{self.hedef}_sqlmap_{url.split('/')[-1]}.txt")
+            komut = ["sqlmap", "-u", url, "--batch", "--level=1", "--risk=1", "--output-dir", self.çıktı_dizini]
             print(f"SQLMap testi yapılıyor: {url}")
             
             sonuç = self.komut_çalıştır(komut, timeout=3600)
@@ -327,7 +333,8 @@ class ZenginTarayici:
     
     def tarama_yap(self):
         """Taramaları belirlenen sırayla yürüt"""
-        print(f"Hedef IP: {self.hedef_ip}")
+        print(f"Hedef: {self.hedef}")
+        print(f"IP Adresi: {self._ip_çözümle()}")
         print(f"Tespit edilen araçlar: {[k for k, v in self.mevcut_araçlar.items() if v]}")
         print(f"Tarama sırası: {[adım['adı'] for adım in self.tarama_sırası]}")
         print("=" * 50)
@@ -352,8 +359,6 @@ class ZenginTarayici:
                 sonuç = self.gobuster_tarama()
             elif adım['adı'] == 'zap_baseline':
                 sonuç = self.zap_baseline_tarama()
-            elif adım['adı'] == 'zap_aktif':
-                sonuç = self.zap_aktif_tarama()
             elif adım['adı'] == 'nuclei':
                 sonuç = self.nuclei_tarama()
             elif adım['adı'] == 'sqlmap':
@@ -375,10 +380,11 @@ class ZenginTarayici:
             print(f"{adım}: {bilgi['sonuç']} ({bilgi['süre']:.2f}s)")
         
         # JSON formatında sonuçları kaydet
-        rapor_dosyası = os.path.join(self.çıktı_dizini, f"{self.hedef_ip}_rapor.json")
+        rapor_dosyası = os.path.join(self.çıktı_dizini, f"{self.hedef}_rapor.json")
         with open(rapor_dosyası, 'w') as f:
             json.dump({
-                'hedef': self.hedef_ip,
+                'hedef': self.hedef,
+                'ip_adresi': self._ip_çözümle(),
                 'port_bilgileri': self.port_bilgileri,
                 'web_servisleri': self.web_servisleri,
                 'keşfedilen_dizinler': self.keşfedilen_dizinler,
@@ -387,15 +393,82 @@ class ZenginTarayici:
         
         print(f"\nDetaylı rapor: {rapor_dosyası}")
 
+def ip_aralığı_oluştur(başlangıç: str, bitiş: str) -> List[str]:
+    """IP aralığı oluştur"""
+    ip_listesi = []
+    try:
+        start_ip = ipaddress.ip_address(başlangıç)
+        end_ip = ipaddress.ip_address(bitiş)
+        
+        current_ip = start_ip
+        while current_ip <= end_ip:
+            ip_listesi.append(str(current_ip))
+            current_ip += 1
+            
+    except ValueError as e:
+        print(f"Geçersiz IP aralığı: {e}")
+    
+    return ip_listesi
+
 def main():
     parser = argparse.ArgumentParser(description='Zengin Güvenlik Tarama Scripti')
-    parser.add_argument('hedef', help='Hedef IP adresi veya domain')
+    parser.add_argument('hedef', nargs='?', help='Hedef IP adresi, domain veya IP aralığı (örn: 192.168.1.1-192.168.1.10)')
     parser.add_argument('-o', '--output', help='Çıktı dizini', default='tarama_sonuçları')
+    parser.add_argument('-p', '--ports', help='Özel portlar (örn: 80,443,8080)', default='')
+    parser.add_argument('-l', '--list', help='IP listesi dosyası', default='')
     
     args = parser.parse_args()
     
-    tarayıcı = ZenginTarayici(args.hedef, args.output)
-    tarayıcı.tarama_yap()
+    if not args.hedef and not args.list:
+        parser.print_help()
+        sys.exit(1)
+    
+    # Özel portları ayır
+    özel_portlar = []
+    if args.ports:
+        özel_portlar = [p.strip() for p in args.ports.split(',') if p.strip()]
+    
+    # IP listesi oluştur
+    hedefler = []
+    
+    if args.list:
+        # Dosyadan IP listesi oku
+        try:
+            with open(args.list, 'r') as f:
+                for satır in f:
+                    satır = satır.strip()
+                    if satır and not satır.startswith('#'):
+                        hedefler.append(satır)
+        except FileNotFoundError:
+            print(f"Dosya bulunamadı: {args.list}")
+            sys.exit(1)
+    elif args.hedef and '-' in args.hedef:
+        # IP aralığı
+        başlangıç, bitiş = args.hedef.split('-', 1)
+        hedefler = ip_aralığı_oluştur(başlangıç.strip(), bitiş.strip())
+    else:
+        # Tek hedef
+        hedefler = [args.hedef]
+    
+    print(f"Taranacak hedef sayısı: {len(hedefler)}")
+    
+    for i, hedef in enumerate(hedefler):
+        print(f"\n{'='*50}")
+        print(f"[{i+1}/{len(hedefler)}] {hedef} taranıyor...")
+        print(f"{'='*50}")
+        
+        try:
+            tarayıcı = ZenginTarayici(hedef, args.output, özel_portlar)
+            tarayıcı.tarama_yap()
+            
+            # Hedefler arasında bekleme
+            if i < len(hedefler) - 1:
+                print(f"\n5 saniye bekleniyor...")
+                time.sleep(5)
+                
+        except Exception as e:
+            print(f"{hedef} taramasında hata: {e}")
+            continue
 
 if __name__ == "__main__":
     main()
